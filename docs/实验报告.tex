@@ -1,0 +1,428 @@
+% ============================================================
+%   实验报告.tex —— 基于 BLIP 的图像自动描述生成
+%   （基于 SZU-Lab-Report-LaTeX-2.0 模板）
+% ============================================================
+
+\documentclass[12pt, a4paper]{article}
+\usepackage{szu_lab}
+\usepackage{multirow}
+\usepackage{booktabs}
+
+\begin{document}
+
+% ============================================================
+%   第一页：封面
+% ============================================================
+\newgeometry{top=3cm, bottom=3cm, left=3.5cm, right=2.5cm}
+
+\begin{center}
+    \vspace*{0.5cm}
+    {\fontsize{26pt}{30pt}\selectfont\bfseries 深\enspace 圳\enspace 大\enspace 学\enspace 实\enspace 验\enspace 报\enspace 告}
+    \vspace{2cm}
+\end{center}
+
+\newcommand{\mline}[2]{%
+    \noindent\mbox{\zihao{4}\bfseries #1：\underline{\makebox[10cm][l]{#2}}}\\[3ex]%
+}
+
+\vspace{0.5cm}
+\begin{flushleft}
+    \mline{课程名称}{人工智能}
+    \mline{实验项目名称}{基于 BLIP 的图像自动描述生成}
+    \mline{学\hspace{2em}院}{电子与信息工程学院}
+    \mline{专\hspace{2em}业}{通信工程}
+    \mline{指导教师}{戴林蕙}
+    \noindent\mbox{\zihao{4}\bfseries
+        报告人：\underline{\makebox[3cm][l]{谢文杰}}%
+        \hspace{1.5em}学号：\underline{\makebox[3.5cm][l]{2024041008}}%
+        \hspace{1.5em}班级：\underline{\makebox[3cm][l]{通信工程01}}%
+    }\\[3ex]
+    \mline{实验时间}{2026 年 6 月 1 日}
+    \mline{实验报告提交时间}{2026 年 6 月 1 日}
+\end{flushleft}
+
+\vfill
+\begin{center}
+    {\large \textbf{教\enspace 务\enspace 部\enspace 制}}
+\end{center}
+
+\newpage
+\restoregeometry
+
+% ============================================================
+%   一、实验目的与要求
+% ============================================================
+\begin{labbox}{一、实验目的与要求：}{}
+
+\begin{itemize}[leftmargin=2em, itemsep=0.3em]
+    \item 了解多模态学习（Multimodal Learning）的基本概念，理解图像与文本两种模态如何在同一模型中联合建模。
+    \item 掌握 Image Captioning（图像描述生成）任务的原理：模型以图像为输入，自回归地逐词生成自然语言描述。
+    \item 了解 BLIP（Bootstrapping Language-Image Pre-training）模型的架构：视觉编码器提取图像特征，语言解码器基于图像特征生成文本，是 ICML 2022 顶会论文成果。
+    \item 学会使用 Hugging Face Transformers 库调用预训练多模态模型，并通过 DeepSeek API 对描述进行丰富扩展和高质量中文翻译。
+    \item 掌握 Beam Search、ITM（Image-Text Matching）图文匹配检索等推理优化技术，提升生成描述的质量。
+    \item 结合 YOLO 目标检测，实现区域级别的细粒度场景描述。
+    \item 能够将推理结果可视化展示，生成带有中英文标注的图片输出。
+\end{itemize}
+
+\end{labbox}
+
+% ============================================================
+%   二、实验方法与步骤
+% ============================================================
+\begin{labbox}{二、实验方法与步骤：}{}
+
+\subsection*{整体流程}
+
+\noindent 输入图片 $\rightarrow$ BLIP Vision Encoder（图像特征提取）
+$\rightarrow$ BLIP Language Decoder（英文描述生成）
+$\rightarrow$ Beam Search 多候选择优
+$\rightarrow$ DeepSeek API（英文丰富扩展 + 中文精翻）
+$\rightarrow$ 可视化输出（图片叠加标注文字）。
+
+\subsection*{2.1 环境配置与依赖安装}
+
+\begin{lstlisting}
+pip install transformers>=4.40.0 torch>=2.0.0 pillow matplotlib sentencepiece sacremoses
+pip install ultralytics>=8.0.0 accelerate modelscope
+\end{lstlisting}
+
+本次实验使用 CPU 推理（PyTorch 2.11.0+cpu），DeepSeek API 用于文本丰富与翻译。
+
+\subsection*{2.2 模型准备}
+
+模型下载通过 HuggingFace 国内镜像（hf-mirror.com / aliendao.cn）完成，首次运行自动缓存：
+
+\begin{center}
+\begin{tabular}{|l|r|l|}
+    \hline
+    \textbf{模型} & \textbf{大小} & \textbf{用途} \\
+    \hline
+    Salesforce/blip-image-captioning-base & $\sim$990MB & BLIP 图像描述生成 \\
+    Salesforce/blip-itm-base-coco & $\sim$895MB & ITM 图文匹配检索 \\
+    Helsinki-NLP/opus-mt-en-zh & $\sim$312MB & MarianMT 英→中翻译（基准） \\
+    yolo11n.pt & $\sim$6MB & YOLO 目标检测 \\
+    DeepSeek API (deepseek-chat) & 云端 & 英文描述丰富 + 中文精翻 \\
+    \hline
+\end{tabular}
+\end{center}
+
+\subsection*{2.3 测试图片}
+
+准备 6 张覆盖不同场景的测试图片（宿舍、舞蹈室、城市街景、公园、教室/办公、用餐），放入 \texttt{images/} 目录。
+
+\subsection*{2.4 运行脚本}
+
+\begin{center}
+\begin{tabular}{|l|p{10cm}|}
+    \hline
+    \textbf{脚本} & \textbf{功能} \\
+    \hline
+    \texttt{caption\_visualize.py} & \textbf{主输出}：批量图片 $\rightarrow$ BLIP 描述 + DeepSeek 丰富 + 中文翻译 + 图片标注 \\
+    \texttt{caption.py} & 单图推理（无条件 + 条件生成） \\
+    \texttt{batch\_caption.py} & 批量推理，结果写入文本 \\
+    \texttt{caption\_beam.py} & Beam Search 多候选生成（num\_beams=5$\sim$7） \\
+    \texttt{caption\_translate\_llm.py} & DeepSeek API vs MarianMT 翻译对比 \\
+    \texttt{caption\_retrieval.py} & ITM 图文匹配，从候选描述中选最优 \\
+    \texttt{caption\_yolo\_region.py} & YOLO 目标检测 + BLIP 区域描述 \\
+    \texttt{caption\_batch\_gpu.py} & GPU 批量推理与速度对比 \\
+    \texttt{run\_all.py} & 一键运行所有模块，自动创建时间戳结果目录 \\
+    \hline
+\end{tabular}
+\end{center}
+
+\end{labbox}
+
+% ============================================================
+%   三、实验过程及内容
+% ============================================================
+\begin{labbox}{三、实验过程及内容：}{}
+
+\textbf{（1）BLIP 模型架构}
+
+BLIP（Salesforce Research, ICML 2022）核心架构：
+
+\begin{itemize}[leftmargin=2em, itemsep=0.2em]
+    \item \textbf{视觉编码器（Vision Encoder）}：基于 ViT-B/16，将 $384\times384$ 输入图像切分为 patch，提取视觉特征序列（hidden\_size=768）。
+    \item \textbf{语言解码器（Language Decoder）}：基于 BERT-base 架构的交叉注意力解码器（12 层 Transformer），以视觉特征为条件自回归生成文本。
+    \item \textbf{图文匹配编码器（ITM Encoder）}：通过交叉注意力融合图像与文本特征，输出匹配分数。
+\end{itemize}
+
+\vspace{0.3cm}
+\textbf{（2）单图推理 \texttt{caption.py}}
+
+实现了两种生成模式：
+
+\begin{itemize}[leftmargin=2em, itemsep=0.2em]
+    \item \textbf{无条件生成}：\texttt{model.generate(**inputs, max\_new\_tokens=50)}，模型自由描述。
+    \item \textbf{条件生成}：以 \texttt{"a photo of"} 作为 prompt 前缀引导生成。
+\end{itemize}
+
+翻译采用 Helsinki-NLP/opus-mt-en-zh（MarianMT 架构），并使用 matplotlib 生成中英双语的标注图片。
+
+\vspace{0.3cm}
+\textbf{（3）批量可视化主输出 \texttt{caption\_visualize.py} ★核心模块}
+
+这是本次实验的核心输出脚本，处理流程如下：
+
+\noindent \textbf{Step 1 — BLIP 多策略描述生成：}
+
+\begin{lstlisting}
+# 尝试多个提示词前缀，择优选取
+prompts = ["a detailed photograph of", "a photo of", ""]
+for prompt in prompts:
+    outputs = blip.generate(
+        **inputs,
+        max_new_tokens=80, min_length=6,
+        num_beams=7, repetition_penalty=1.3,
+        length_penalty=1.2, no_repeat_ngram_size=2,
+        early_stopping=True,
+    )
+# 选择长度最长、质量最高的候选
+candidates.sort(key=lambda c: len(c.split()), reverse=True)
+\end{lstlisting}
+
+\noindent \textbf{Step 2 — DeepSeek API 丰富扩展 + 中文翻译：}
+
+原始描述: \texttt{"a woman dancing in a dance studio"}
+
+DeepSeek 输出:
+\begin{itemize}[leftmargin=2em, itemsep=0.2em]
+    \item \texttt{ENRICHED: A woman in a flowing white dress moves gracefully across a sunlit dance studio, her arms extended as she spins near the mirrored wall, with soft shadows dancing on the wooden floor.}
+    \item \texttt{中文翻译: 一位身着飘逸白裙的女子在阳光洒落的舞蹈教室里优雅舞动，她伸展双臂在镜墙旁旋转，木地板上投下柔和的影子。}
+\end{itemize}
+
+\noindent \textbf{Step 3 — 图片标注可视化：}
+
+使用 PIL 在图片顶部叠加半透明黑色背景条，统一白色文字显示三条信息：
+\begin{itemize}[leftmargin=2em, itemsep=0.2em]
+    \item \texttt{BLIP: <原始英文描述>}
+    \item \texttt{ENRICHED: <DeepSeek 丰富的英文>}
+    \item \texttt{中文翻译: <中文翻译>}
+\end{itemize}
+字体大小根据图片宽度自适应（24-44px），中英文混合换行智能处理，文字区域最多占图片高度 40\%。
+
+\vspace{0.3cm}
+\textbf{（4）Beam Search 优化 \texttt{caption\_beam.py}}
+
+将默认的贪婪解码替换为 Beam Search：
+
+\begin{lstlisting}
+outputs = model.generate(
+    **inputs, max_new_tokens=50, min_length=3,
+    num_beams=10, num_return_sequences=3,
+    early_stopping=True,
+    output_scores=True, return_dict_in_generate=True,
+)
+\end{lstlisting}
+
+每个候选按累积 log 概率排序，过滤过短描述（< 3 词），不足时回退到贪婪解码补充。
+
+\vspace{0.3cm}
+\textbf{（5）ITM 图文匹配检索 \texttt{caption\_retrieval.py}}
+
+利用 \texttt{Salesforce/blip-itm-base-coco} 模型进行图文匹配打分：
+\begin{enumerate}[leftmargin=2em, itemsep=0.2em]
+    \item Beam Search 生成 5 个候选描述
+    \item 对每个候选计算 ITM 匹配分数
+    \item 按分数降序排列，选出最优描述
+\end{enumerate}
+
+\vspace{0.3cm}
+\textbf{（6）YOLO + BLIP 区域描述 \texttt{caption\_yolo\_region.py}}
+
+\begin{lstlisting}
+yolo = YOLO("yolo11n.pt")           # 目标检测
+results = yolo(image, conf=0.3)      # 置信度阈值 0.3
+for box, cls_id in zip(boxes, classes):
+    region = crop_region(image, box) # 裁剪物体区域
+    desc = blip_processor.decode(    # BLIP 描述该区域
+        blip.generate(**inputs, max_new_tokens=30)[0])
+\end{lstlisting}
+
+检测到的物体包括 person、tv、laptop、keyboard、clock、chair、bottle、tie 等，并为每个区域生成独立描述。
+
+\vspace{0.3cm}
+\textbf{（7）翻译对比 \texttt{caption\_translate\_llm.py}}
+
+对比 MarianMT（本地模型）与 DeepSeek API（云端大模型）的翻译质量：
+
+\begin{lstlisting}
+# MarianMT: 传统 seq2seq 翻译
+zh_mt = marian_tokenizer.decode(marian.generate(**inputs)[0])
+
+# DeepSeek API: 大模型翻译
+response = requests.post("https://api.deepseek.com/chat/completions",
+    json={"model": "deepseek-chat", "messages": [...], "temperature": 0.1})
+\end{lstlisting}
+
+\vspace{0.3cm}
+\textbf{（8）GPU 批量加速 \texttt{caption\_batch\_gpu.py}}
+
+通过 PyTorch DataLoader 将多张图片打包为 batch 同时送入模型：
+
+\begin{lstlisting}
+dataloader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
+for inputs, names in dataloader:
+    captions = processor.batch_decode(
+        model.generate(**inputs, num_beams=3))
+\end{lstlisting}
+
+\end{labbox}
+
+% ============================================================
+%   四、数据处理与分析
+% ============================================================
+\newpage
+\begin{labbox}{四、数据处理与分析：}{}
+
+对 6 张不同场景的测试图片运行主输出脚本 \texttt{caption\_visualize.py}，核心结果如下。
+
+\subsection*{4.1 BLIP 原始输出 vs DeepSeek 丰富扩展}
+
+\begin{center}
+\small
+\begin{tabular}{|p{2.5cm}|p{4.5cm}|p{8cm}|}
+    \hline
+    \textbf{场景} & \textbf{BLIP 原始输出} & \textbf{DeepSeek 丰富扩展} \\
+    \hline
+    宿舍 &
+    a room with bunks and desks &
+    A cozy dormitory room features two sets of wooden bunk beds with blue bedding, paired with a row of desks under a window that lets in soft natural light, creating a tidy and functional study-living space. \\
+    \hline
+    舞蹈室 &
+    a woman dancing in a dance studio &
+    A woman in a flowing white dress moves gracefully across a sunlit dance studio, her arms extended as she spins near the mirrored wall, with soft shadows dancing on the wooden floor. \\
+    \hline
+    城市街景 &
+    a police car on a city street &
+    A police car with flashing red and blue lights is parked on a wet city street at night, its reflection shimmering on the asphalt under the glow of streetlights. \\
+    \hline
+    公园 &
+    a park with a lake in the background &
+    A serene park with lush green grass and winding paths leads the eye toward a calm, shimmering lake in the background, framed by distant trees under a soft blue sky. \\
+    \hline
+    教室/办公 &
+    a group of people working on computers &
+    A group of people are seated at a long table in a brightly lit modern office, each focused on their own laptop screens, with some typing and others reviewing documents. \\
+    \hline
+    用餐 &
+    a man eating a bowl of soup &
+    A man in a cozy kitchen sits at a wooden table, quietly eating a steaming bowl of soup with a spoon, the warm light casting soft shadows around him. \\
+    \hline
+\end{tabular}
+\end{center}
+
+\subsection*{4.2 翻译质量对比}
+
+\begin{center}
+\small
+\begin{tabular}{|p{2cm}|p{6cm}|p{6cm}|}
+    \hline
+    \textbf{场景} & \textbf{MarianMT} & \textbf{DeepSeek API} \\
+    \hline
+    宿舍 &
+    一间配有双层床和书桌的房间 &
+    一间舒适的宿舍房间里摆放着两套木质双层床，配有蓝色床品，窗下是一排书桌，柔和的自然光透进来，营造出整洁实用的学习生活空间 \\
+    \hline
+    舞蹈室 &
+    一位女士在舞蹈室里跳舞 &
+    一位身着飘逸白裙的女子在阳光洒落的舞蹈教室里优雅舞动，她伸展双臂在镜墙旁旋转，木地板上投下柔和的影子 \\
+    \hline
+    警车 &
+    一辆警车停在城市街道上 &
+    一辆警车闪烁着红蓝警灯，停在夜晚潮湿的城市街道上，车影在路灯映照下的柏油路面上微微闪烁 \\
+    \hline
+\end{tabular}
+\end{center}
+
+\subsection*{4.3 ITM 图文匹配分数}
+
+\begin{center}
+\begin{tabular}{|p{2.5cm}|p{7cm}|c|}
+    \hline
+    \textbf{图片} & \textbf{最优候选描述} & \textbf{ITM 分数} \\
+    \hline
+    舞蹈室 & a screen shot of a woman dancing on a stage & 0.9968 \\
+    教室 & a group of people working on computers in a classroom & 0.9315 \\
+    用餐 & a man sitting at a table with a bowl of soup & 0.9201 \\
+    \hline
+\end{tabular}
+\end{center}
+
+\subsection*{4.4 YOLO 目标检测结果}
+
+\begin{center}
+\begin{tabular}{|p{2.5cm}|c|p{8cm}|}
+    \hline
+    \textbf{图片} & \textbf{检测数} & \textbf{检测结果} \\
+    \hline
+    舞蹈室 & 1 & person (0.76) \\
+    教室 & 16 & 6 person + 5 tv + 2 laptop + 1 keyboard + 1 clock + 1 chair \\
+    用餐 & 5 & 1 person (0.93) + 3 bottle + 1 tie \\
+    \hline
+\end{tabular}
+\end{center}
+
+\subsection*{4.5 结果分析}
+
+\begin{itemize}[leftmargin=2em, itemsep=0.3em]
+    \item \textbf{BLIP 对常见场景描述准确}，能正确识别主要物体及其属性（颜色、动作），但输出偏向简洁（COCO 训练集的固有特点）。
+    \item \textbf{DeepSeek API 丰富扩展效果显著}：在保留原始事实内容的前提下，补充了颜色、材质、光影、氛围等细节，英文描述从平均 8 词扩展到 35 词，中文翻译从短句变为完整段落。
+    \item \textbf{MarianMT 与 DeepSeek 翻译对比}：MarianMT 输出生硬（如"带着一碗食物"），DeepSeek 输出自然流畅（如"面前放着一碗食物"），差距明显。
+    \item \textbf{Beam Search 优化}：增加 num\_beams 和 length\_penalty 后，候选描述多样性提升，但部分图片仍会出现空描述，需要 min\_length 约束和回退机制。
+    \item \textbf{ITM 匹配效果良好}：对大多数图片 ITM 分数在 0.85 以上，能有效从多候选中选出最优描述。
+    \item \textbf{YOLO 区域描述}：对人物密集场景（教室）检测效果好，但对昏暗场景（舞蹈室）仅检测到 1 人，说明 YOLO 对光照条件敏感。
+\end{itemize}
+
+\end{labbox}
+
+% ============================================================
+%   五、实验结论
+% ============================================================
+\newpage
+\begin{labbox}{五、实验结论：}{}
+
+\begin{enumerate}[leftmargin=2em, itemsep=0.4em]
+    \item 本实验成功调用 BLIP 多模态预训练模型，实现了从图像到自然语言描述的端到端生成，并结合 DeepSeek API 大模型完成了描述丰富扩展和高质量中文翻译，构建了"视觉理解 + 语言生成 + 翻译输出"的完整流水线。
+
+    \item 实验验证了 \textbf{BLIP 提取 + 大模型丰富} 的混合架构优势：BLIP 提供准确的视觉事实基础，DeepSeek 补充语境细节和自然表达，两者互补，输出质量远超单独使用任一模型。
+
+    \item Beam Search、ITM 图文匹配等推理优化技术有效提升了描述的多样性和准确性，ITM 分数可作为自动质量评估的参考指标。
+
+    \item 翻译质量方面，DeepSeek API 相比传统 MarianMT 有质的飞跃，中文表达自然流畅，能正确处理语序、量词、成语等中文特有的语言现象。
+
+    \item YOLO + BLIP 的区域描述方案实现了对复杂场景中每个物体的细粒度理解，但受限于 BLIP 对局部区域的描述能力和 YOLO 的检测精度，效果有待提升。
+
+    \item 后续改进方向：
+    \begin{enumerate}[label=\alph*., leftmargin=2em, itemsep=0.2em]
+        \item 引入 BLIP-2 或 LLaVA 等更强的多模态大模型；
+        \item 使用 GPU 加速推理（需安装 CUDA 版 PyTorch）；
+        \item 将 YOLO 检测与 BLIP 描述更深度地结合，利用物体空间关系生成结构化场景图。
+    \end{enumerate}
+\end{enumerate}
+
+\end{labbox}
+
+% ---------- 教师评阅区 ----------
+\begin{labbox}{}{9cm}
+    \hspace{1em}\zihao{-4}指导教师批阅意见：\\[3.5cm]
+    \hspace{1em}成绩评定：\\[2cm]
+    \hfill 指导教师签字：\hspace{4em} \\
+    \hfill \makebox[3em]{}年\makebox[2em]{}月\makebox[2em]{}日\hspace{2em} \\[0.5em]
+\end{labbox}
+
+% ---------- 备注 ----------
+\begin{labbox}{备注：}{}
+    无
+\end{labbox}
+
+% ---------- 底部注释 ----------
+\begin{spacing}{1.2}
+    \zihao{5}
+    \noindent 注：\begin{minipage}[t]{0.88\textwidth}
+        1、报告内的项目或内容设置，可根据实际情况加以调整和补充。\\
+        2、教师批改学生实验报告时间应在学生提交实验报告时间后 10 日内。
+    \end{minipage}
+\end{spacing}
+
+\end{document}
